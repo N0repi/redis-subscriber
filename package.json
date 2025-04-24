@@ -1,0 +1,17 @@
+{
+  "name": "redis-node-environment",
+  "version": "1.0.0",
+  "description": "Redis‐TTL subscriber to automatically stop RunPod pods",
+  "main": "worker.js",
+  "type": "module",
+  "scripts": {
+    "start": "node worker.js"
+  },
+  "keywords": [],
+  "author": "N0repi",
+  "license": "MIT",
+  "dependencies": {
+    "ioredis": "^5.6.1",
+    "node-fetch": "^3.3.2"
+  }
+}
