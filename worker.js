@@ -1,3 +1,5 @@
+// worker.js
+
 import IORedis from "ioredis";
 import fetch from "node-fetch";
 
