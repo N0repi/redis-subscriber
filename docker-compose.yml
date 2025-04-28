@@ -1,1 +1,21 @@
- 
+version: "3.8"
+
+services:
+  sse-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.sse
+    image: my-sse-server
+    env_file: .env
+    ports:
+      - "4000:4000"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    image: my-worker
+    env_file: .env
+    restart: unless-stopped
+
