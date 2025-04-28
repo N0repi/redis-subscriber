@@ -5,8 +5,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.sse
-    image: my-sse-server
-    env_file: .env
+    image: my-sse-server    # ← ASCII hyphen here
+    env_file: .envServer
     ports:
       - "4000:4000"
     restart: unless-stopped
@@ -15,7 +15,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.worker
-    image: my-worker
+    image: my-worker        # ← ASCII hyphen here
     env_file: .env
     restart: unless-stopped
-

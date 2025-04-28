@@ -1,69 +1,97 @@
 // sse-server.js
 import express from "express";
-import cors  from "cors";
-import { Redis } from "@upstash/redis";
+import cors from "cors";
 import { MongoClient } from "mongodb";
+import IORedis from "ioredis";
 
+// Create Express app
 const app = express();
 
-// Allow all
-// app.use(cors());
-
-// Allow only production domain
+// Only allow requests from your production domain
 app.use(
   cors({
     origin: "https://wispi.art",
   })
 );
 
+// -----------------------
+// Redis setup (ioredis)
+// -----------------------
+const redisUrl = process.env.UPSTASH_REDIS_REDIS_URL;
+const redisToken = process.env.UPSTASH_REDIS_REDIS_TOKEN;
 
-// Redis & Mongo setup...
-const redis = new Redis({ url: process.env.UPSTASH_REDIS_REDIS_URL, token: process.env.UPSTASH_REDIS_REDIS_TOKEN });
+const redis = new IORedis(redisUrl, {
+  password: redisToken,
+  tls: {}, // required by Upstash
+});
+
+// Enable key‐space notifications for expired/set events
 await redis.config("SET", "notify-keyspace-events", "Ex");
-const client = new MongoClient(process.env.MONGO_URI);
-await client.connect();
-const podMeta = client.db("podActivityDB").collection("podMetadata");
 
-// track SSE clients per subscription
-const clients = new Map(); // Map<subscriptionId, Set<res>>
+// -----------------------
+// MongoDB setup
+// -----------------------
+const mongoUri = process.env.MONGO_URI;
+const mongoClient = new MongoClient(mongoUri);
+await mongoClient.connect();
+const podMeta = mongoClient
+  .db("podActivityDB")
+  .collection("podMetadata");
 
-// Send a comment every 25s to keep the connection alive
+// -----------------------
+// SSE client management
+// -----------------------
+const clients = new Map(); // Map<subscriptionId, Set<response>>
+
+// Heartbeat every 25s to keep connections alive
 setInterval(() => {
   for (const subs of clients.values()) {
     for (const res of subs) {
       res.write(`: heartbeat\n\n`);
     }
   }
-}, 25000);
+}, 25_000);
 
+// SSE endpoint
 app.get("/events", (req, res) => {
   const subId = req.query.subscriptionId;
-  if (!subId) return res.status(400).end("Missing subscriptionId");
+  if (!subId) {
+    return res.status(400).end("Missing subscriptionId");
+  }
 
+  // Set headers for SSE
   res.writeHead(200, {
-    "Content-Type":      "text/event-stream",
-    "Cache-Control":     "no-cache",
-    Connection:          "keep-alive",
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
   });
   res.write("\n");
 
-  if (!clients.has(subId)) clients.set(subId, new Set());
+  // Register this client
+  if (!clients.has(subId)) {
+    clients.set(subId, new Set());
+  }
   clients.get(subId).add(res);
 
+  // Clean up on disconnect
   req.on("close", () => {
-    // remove this client and end the response
     clients.get(subId).delete(res);
     res.end();
   });
 });
 
+// -----------------------
+// Redis keyspace listener
+// -----------------------
 await redis.psubscribe("__keyspace@0__:ready:*");
+
 redis.on("pmessage", async (_pattern, channel, msg) => {
   if (msg !== "set") return;
-  const podId = channel.split(":")[1];
 
+  const podId = channel.split(":")[1];
   const doc = await podMeta.findOne({ podId });
   if (!doc) return;
+
   const subs = clients.get(doc.subscriptionId);
   if (!subs) return;
 
@@ -74,4 +102,10 @@ redis.on("pmessage", async (_pattern, channel, msg) => {
   }
 });
 
-app.listen(4000, () => console.log("SSE server listening on :4000"));
+// -----------------------
+// Start server
+// -----------------------
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => {
+  console.log(`SSE server listening on port ${PORT}`);
+});

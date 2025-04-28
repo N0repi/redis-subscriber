@@ -13,6 +13,12 @@ RUN npm ci --only=production
 # Copy subscriber code
 COPY worker.js ./
 
+# create a non-root user
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# chown your app folder
+RUN chown -R appuser:appgroup /usr/src/app
+USER appuser
+
 # Default command
 CMD ["node", "worker.js"]
 

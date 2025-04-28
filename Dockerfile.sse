@@ -8,5 +8,11 @@ RUN npm ci --only=production
 # only need sse-server.js and its deps
 COPY sse-server.js ./
 
+# create a non-root user
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+# chown your app folder
+RUN chown -R appuser:appgroup /usr/src/app
+USER appuser
+
 EXPOSE 4000
 CMD ["node", "sse-server.js"]
