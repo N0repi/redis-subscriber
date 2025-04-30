@@ -40,7 +40,12 @@ const redis = new IORedis(redisUrl, {
 });
 
 // Enable key‐space notifications for expired/set events
-await redis.config("SET", "notify-keyspace-events", "Ex");
+try {
+  const reply = await redis.config("SET", "notify-keyspace-events", "Ex");
+  console.log("CONFIG SET reply:", reply);
+} catch (err) {
+  console.warn("Could not CONFIG SET notify-keyspace-events:", err.message);
+}
 
 // -----------------------
 // MongoDB setup
