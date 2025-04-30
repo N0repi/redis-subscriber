@@ -59,6 +59,8 @@ app.get("/events", (req, res) => {
     return res.status(400).end("Missing subscriptionId");
   }
 
+  console.log(`✅ SSE client connected for subscriptionId=${subId}`);
+
   // Set headers for SSE
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -89,6 +91,8 @@ redis.on("pmessage", async (_pattern, channel, msg) => {
   if (msg !== "set") return;
 
   const podId = channel.split(":")[1];
+  console.log("podId:", podId)
+
   const doc = await podMeta.findOne({ podId });
   if (!doc) return;
 
