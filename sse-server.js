@@ -8,9 +8,23 @@ import IORedis from "ioredis";
 const app = express();
 
 // Only allow requests from your production domain
+const allowedOrigins = [
+  "https://wispi.art",
+  "https://www.wispi.art",
+];
+
 app.use(
   cors({
-    origin: "https://wispi.art",
+    origin: (incomingOrigin, callback) => {
+      // allow requests with no origin (e.g. mobile apps, curl)
+      if (!incomingOrigin) return callback(null, true);
+      if (allowedOrigins.includes(incomingOrigin)) {
+        return callback(null, true);
+      }
+      return callback(
+        new Error(`Origin ${incomingOrigin} not allowed by CORS`)
+      );
+    },
   })
 );
 
