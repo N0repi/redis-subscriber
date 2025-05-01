@@ -43,6 +43,9 @@ const redis = new IORedis(redisUrl, {
 try {
   const reply = await redis.config("SET", "notify-keyspace-events", "Ex");
   console.log("CONFIG SET reply:", reply);
+
+  const [_, current] = await redis.config("GET", "notify-keyspace-events");
+  console.log("notify-keyspace-events is now:", current);
 } catch (err) {
   console.warn("Could not CONFIG SET notify-keyspace-events:", err.message);
 }
