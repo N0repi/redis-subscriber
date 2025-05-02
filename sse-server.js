@@ -4,68 +4,52 @@ import cors from "cors";
 import { MongoClient } from "mongodb";
 import IORedis from "ioredis";
 
-// Create Express app
 const app = express();
 
-// Only allow requests from your production domain
-const allowedOrigins = [
-  "https://wispi.art",
-  "https://www.wispi.art",
-];
+// ——————————————————————————————————————————————————
+// Middleware
+// ——————————————————————————————————————————————————
+app.use(cors({
+  origin: (incomingOrigin, callback) => {
+    if (!incomingOrigin) return callback(null, true);
+    if (["https://wispi.art","https://www.wispi.art"].includes(incomingOrigin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`Origin ${incomingOrigin} not allowed by CORS`));
+  }
+}));
 
-app.use(
-  cors({
-    origin: (incomingOrigin, callback) => {
-      // allow requests with no origin (e.g. mobile apps, curl)
-      if (!incomingOrigin) return callback(null, true);
-      if (allowedOrigins.includes(incomingOrigin)) {
-        return callback(null, true);
-      }
-      return callback(
-        new Error(`Origin ${incomingOrigin} not allowed by CORS`)
-      );
-    },
-  })
-);
+// We need JSON body‐parsing for our new /notify-ready hook
+app.use(express.json());
 
-// -----------------------
+// ——————————————————————————————————————————————————
 // Redis setup (ioredis)
-// -----------------------
-const redisUrl = process.env.UPSTASH_REDIS_REDIS_URL;
-const redisToken = process.env.UPSTASH_REDIS_REDIS_TOKEN;
-
-const redis = new IORedis(redisUrl, {
-  password: redisToken,
-  tls: {}, // required by Upstash
+// ——————————————————————————————————————————————————
+const redis = new IORedis(process.env.UPSTASH_REDIS_REDIS_URL, {
+  password: process.env.UPSTASH_REDIS_REDIS_TOKEN,
+  tls: {}
 });
 
-// Enable key‐space notifications for expired/set events
+// (optional) configure keyspace notifications
 try {
-  const reply = await redis.config("SET", "notify-keyspace-events", "Ksx");
-  console.log("CONFIG SET reply:", reply);
-
-  const [_, current] = await redis.config("GET", "notify-keyspace-events");
-  console.log("notify-keyspace-events is now:", current);
+  await redis.config("SET", "notify-keyspace-events", "Ex");
 } catch (err) {
   console.warn("Could not CONFIG SET notify-keyspace-events:", err.message);
 }
 
-// -----------------------
+// ——————————————————————————————————————————————————
 // MongoDB setup
-// -----------------------
-const mongoUri = process.env.MONGO_URI;
-const mongoClient = new MongoClient(mongoUri);
+// ——————————————————————————————————————————————————
+const mongoClient = new MongoClient(process.env.MONGO_URI);
 await mongoClient.connect();
-const podMeta = mongoClient
-  .db("podActivityDB")
-  .collection("podMetadata");
+const podMeta = mongoClient.db("podActivityDB").collection("podMetadata");
 
-// -----------------------
-// SSE client management
-// -----------------------
-const clients = new Map(); // Map<subscriptionId, Set<response>>
+// ——————————————————————————————————————————————————
+// SSE client registry
+// ——————————————————————————————————————————————————
+const clients = new Map();          // subscriptionId → Set<response>
 
-// Heartbeat every 25s to keep connections alive
+// heartbeat to keep connections alive
 setInterval(() => {
   for (const subs of clients.values()) {
     for (const res of subs) {
@@ -74,16 +58,14 @@ setInterval(() => {
   }
 }, 25_000);
 
-// SSE endpoint
+// ——————————————————————————————————————————————————
+// 1) SSE endpoint
+// ——————————————————————————————————————————————————
 app.get("/events", (req, res) => {
   const subId = req.query.subscriptionId;
-  if (!subId) {
-    return res.status(400).end("Missing subscriptionId");
-  }
+  if (!subId) return res.status(400).end("Missing subscriptionId");
 
   console.log(`✅ SSE client connected for subscriptionId=${subId}`);
-
-  // Set headers for SSE
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -91,47 +73,61 @@ app.get("/events", (req, res) => {
   });
   res.write("\n");
 
-  // Register this client
-  if (!clients.has(subId)) {
-    clients.set(subId, new Set());
-  }
+  if (!clients.has(subId)) clients.set(subId, new Set());
   clients.get(subId).add(res);
 
-  // Clean up on disconnect
   req.on("close", () => {
     clients.get(subId).delete(res);
     res.end();
   });
 });
 
-// -----------------------
-// Redis keyspace listener
-// -----------------------
-await redis.psubscribe("__keyspace@0__:ready:*");
+// ——————————————————————————————————————————————————
+// 2) NEW: HTTP hook to broadcast “ready” to SSE clients
+// ——————————————————————————————————————————————————
+app.post(
+  "/notify-ready",
+  async (req, res) => {
+    const { podId } = req.body;
+    if (!podId) return res.status(400).json({ error: "Missing podId" });
 
+    console.log("🔔 /notify-ready for podId=", podId);
+    const doc = await podMeta.findOne({ podId });
+    if (doc) {
+      const subs = clients.get(doc.subscriptionId) || new Set();
+      const payload = JSON.stringify({ podId, event: "ready" });
+      for (const client of subs) {
+        client.write(`event: ready\n`);
+        client.write(`data: ${payload}\n\n`);
+      }
+    }
+
+    return res.status(200).json({ success: true });
+  }
+);
+
+// ——————————————————————————————————————————————————
+// 3) fallback: key‐space notifications listener (optional)
+// ——————————————————————————————————————————————————
+await redis.psubscribe("__keyspace@0__:ready:*");
 redis.on("pmessage", async (_pattern, channel, msg) => {
   if (msg !== "set") return;
-
-  const parts = channel.split(":");
-  const podId = parts[2];     // index 2 is the actual podId
-  console.log("podId:", podId)
+  const podId = channel.split(":")[2];
+  console.log("💥 keyspace fired for podId=", podId);
 
   const doc = await podMeta.findOne({ podId });
   if (!doc) return;
-
-  const subs = clients.get(doc.subscriptionId);
-  if (!subs) return;
-
+  const subs = clients.get(doc.subscriptionId) || new Set();
   const payload = JSON.stringify({ podId, event: "ready" });
-  for (const res of subs) {
-    res.write(`event: ready\n`);
-    res.write(`data: ${payload}\n\n`);
+  for (const client of subs) {
+    client.write(`event: ready\n`);
+    client.write(`data: ${payload}\n\n`);
   }
 });
 
-// -----------------------
+// ——————————————————————————————————————————————————
 // Start server
-// -----------------------
+// ——————————————————————————————————————————————————
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`SSE server listening on port ${PORT}`);
