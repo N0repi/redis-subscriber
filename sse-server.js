@@ -11,12 +11,26 @@ const app = express();
 // ——————————————————————————————————————————————————
 app.use(cors({
   origin: (incomingOrigin, callback) => {
+    // allow curl / server‐side (no Origin)
     if (!incomingOrigin) return callback(null, true);
-    if (["https://wispi.art","https://www.wispi.art"].includes(incomingOrigin)) {
+
+    // explicitly whitelist your frontends *and* your SSE host
+    const allowed = [
+      "https://wispi.art",
+      "https://www.wispi.art",
+      "https://waifus.me",       // ← add this
+      "https://www.waifus.me",   // ← add this if you use www
+    ];
+
+    console.log("🔑 SSE handshake Origin:", incomingOrigin);
+    if (allowed.includes(incomingOrigin)) {
       return callback(null, true);
     }
-    return callback(new Error(`Origin ${incomingOrigin} not allowed by CORS`));
-  }
+    return callback(
+      new Error(`Origin ${incomingOrigin} not allowed by CORS`)
+    );
+  },
+  methods: ["GET","POST","OPTIONS"],   // allow your new /notify-ready too
 }));
 
 // We need JSON body‐parsing for our new /notify-ready hook
@@ -32,7 +46,7 @@ const redis = new IORedis(process.env.UPSTASH_REDIS_REDIS_URL, {
 
 // (optional) configure keyspace notifications
 try {
-  await redis.config("SET", "notify-keyspace-events", "Ex");
+  await redis.config("SET", "notify-keyspace-events", "Ksx");
 } catch (err) {
   console.warn("Could not CONFIG SET notify-keyspace-events:", err.message);
 }
@@ -85,10 +99,9 @@ app.get("/events", (req, res) => {
 // ——————————————————————————————————————————————————
 // 2) NEW: HTTP hook to broadcast “ready” to SSE clients
 // ——————————————————————————————————————————————————
-app.post(
-  "/notify-ready",
-  async (req, res) => {
+app.post("/notify-ready", express.json(), async (req, res) => {
     const { podId } = req.body;
+    console.log("🔔 [SSE] /notify-ready received, podId=", podId);
     if (!podId) return res.status(400).json({ error: "Missing podId" });
 
     console.log("🔔 /notify-ready for podId=", podId);
