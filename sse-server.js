@@ -41,7 +41,7 @@ const redis = new IORedis(redisUrl, {
 
 // Enable key‐space notifications for expired/set events
 try {
-  const reply = await redis.config("SET", "notify-keyspace-events", "Ex");
+  const reply = await redis.config("SET", "notify-keyspace-events", "Ksx");
   console.log("CONFIG SET reply:", reply);
 
   const [_, current] = await redis.config("GET", "notify-keyspace-events");
@@ -112,7 +112,8 @@ await redis.psubscribe("__keyspace@0__:ready:*");
 redis.on("pmessage", async (_pattern, channel, msg) => {
   if (msg !== "set") return;
 
-  const podId = channel.split(":")[1];
+  const parts = channel.split(":");
+  const podId = parts[2];     // index 2 is the actual podId
   console.log("podId:", podId)
 
   const doc = await podMeta.findOne({ podId });
