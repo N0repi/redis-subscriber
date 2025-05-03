@@ -9,8 +9,8 @@ const {
   POD_KEY: RUNPOD_API_KEY,
 } = process.env;
 
-const EXTEND_TTL_SEC      = 1 * 3600; // re-arm TTL if busy
-const GPU_IDLE_THRESHOLD  = 5;        // %
+const EXTEND_TTL_SEC     = 1 * 3600; // re-arm TTL if busy
+const GPU_IDLE_THRESHOLD = 5;        // percent
 
 if (!redisUrl || !redisToken || !RUNPOD_API_KEY) {
   console.error("❌ Missing required env vars");
@@ -20,35 +20,37 @@ if (!redisUrl || !redisToken || !RUNPOD_API_KEY) {
 const redis = new IORedis(redisUrl, { password: redisToken, tls: {} });
 const sub   = new IORedis(redisUrl, { password: redisToken, tls: {} });
 
+// diagnostics
 redis.on("ready", () => console.log("▶️ Redis client ready"));
 redis.on("error", err => console.error("❌ Redis error:", err));
 sub.on("ready",   () => console.log("▶️ Subscriber ready"));
 sub.on("error",   err => console.error("❌ Subscriber error:", err));
 
 ;(async () => {
-  // 1) Make sure keyspace notifications for expired events are on:
+  // 1) Turn on keyevent notifications for expired keys
   try {
-    await redis.config("SET", "notify-keyspace-events", "Kx");
+    await redis.config("SET", "notify-keyspace-events", "Ex");
     const [, flags] = await redis.config("GET", "notify-keyspace-events");
-    console.log("CONFIG GET notify-keyspace-events →", flags);
+    console.log("CONFIG GET notify-keyspace-events →", flags); // should include “Ex”
   } catch (err) {
     console.error("❌ CONFIG SET failed:", err);
   }
 
-  // 2) Subscribe to the keyspace channel for shutdown:<podId> → expired
-  sub.psubscribe("__keyspace@0__:shutdown:*", (err, count) => {
+  // 2) Subscribe to the keyevent channel for all expirations
+  sub.psubscribe("__keyevent@0__:expired", (err, count) => {
     if (err) console.error("❌ PSUBSCRIBE error:", err);
     else     console.log(`✅ PSUBSCRIBE OK; patterns=${count}`);
   });
 
-  // 3) Handle those expired notifications
-  sub.on("pmessage", async (_pattern, channel, message) => {
-    // channel looks like "__keyspace@0__:shutdown:3ckrohra6uukmj", message is "expired"
-    if (message !== "expired") return;
-    const podId = channel.split(":")[2];
+  // 3) Handle any expired-key message; the payload is the key name
+  sub.on("pmessage", async (_pattern, channel, key) => {
+    // channel == "__keyevent@0__:expired"
+    // key == "shutdown:<podId>"
+    if (!key.startsWith("shutdown:")) return;
+    const podId = key.split(":")[1];
     console.log(`🔔 TTL expired for pod ${podId}`);
 
-    // check GPU utilization
+    // 4) Check GPU utilization
     let util = 0;
     try {
       util = await fetchGpuUtilization(podId);
@@ -58,20 +60,19 @@ sub.on("error",   err => console.error("❌ Subscriber error:", err));
     }
     console.log(`   → pod ${podId} util=${util}%`);
 
-    // still busy? re-arm the TTL
+    // 5) If it’s still busy, re-arm another hour
     if (util > GPU_IDLE_THRESHOLD) {
       console.log(`   ↩️ Pod busy; re-arming TTL (${EXTEND_TTL_SEC}s)`);
       await redis.setex(`shutdown:${podId}`, EXTEND_TTL_SEC, "1");
       return;
     }
 
-    // otherwise, really stop it
+    // 6) Otherwise issue the podStop mutation inline
     console.log(`   ⚡️ Pod idle; issuing StopPod mutation…`);
-
     const graphql = {
       query: `
         mutation {
-          podStop(input: {podId: "${podId}"}) {
+          podStop(input: { podId: "${podId}" }) {
             id
             desiredStatus
           }
