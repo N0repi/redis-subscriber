@@ -2,7 +2,7 @@
 
 import IORedis from "ioredis";
 import fetch from "node-fetch";
-import fetchGpuUtilization from "./fetchGpuUtilization"
+import fetchGpuUtilization from "./fetchGpuUtilization.js"
 
 // Use the Redis URL (not the HTTP REST URL)
 const redisUrl   = process.env.UPSTASH_REDIS_REDIS_URL;

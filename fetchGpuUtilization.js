@@ -1,6 +1,6 @@
 // fetchGpuUtilization.js
 
-import getRunpodInstances from "./getRunpodInstances";
+import getRunpodInstances from "./getRunpodInstances.js";
 
 export default async function fetchGpuUtilization(podId) {
   try {
