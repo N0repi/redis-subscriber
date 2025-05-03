@@ -2,89 +2,108 @@
 
 import IORedis from "ioredis";
 import fetch from "node-fetch";
-import fetchGpuUtilization from "./fetchGpuUtilization.js"
+import fetchGpuUtilization from "./fetchGpuUtilization.js";
 
-// Use the Redis URL (not the HTTP REST URL)
-const redisUrl   = process.env.UPSTASH_REDIS_REDIS_URL;
-const redisToken = process.env.UPSTASH_REDIS_REDIS_TOKEN;
-const RUNPOD_API_KEY = process.env.POD_KEY;
+// ── CONFIG ───────────────────────────────────────────────────────────────
+const {
+  UPSTASH_REDIS_REDIS_URL: redisUrl,
+  UPSTASH_REDIS_REDIS_TOKEN: redisToken,
+  POD_KEY: RUNPOD_API_KEY,
+} = process.env;
 
-const EXTEND_TTL_SEC = 1 * 3600; // extension of shutdown timer (1 hour)
-const GPU_IDLE_THRESHOLD = 5;  // percent
+const EXTEND_TTL_SEC = 1 * 3600; // 1 hour extension
+const GPU_IDLE_THRESHOLD = 5;    // percent
 
 if (!redisUrl || !redisToken || !RUNPOD_API_KEY) {
-  console.error("Missing required env vars");
+  console.error("❌ Missing required env vars");
   process.exit(1);
 }
 
-// Connect over TLS to Upstash's Redis port (10000)
-const redis = new IORedis(redisUrl, {
-  password: redisToken,
-  tls: {},
-});
-const sub = new IORedis(redisUrl, {
-  password: redisToken,
-  tls: {},
-});
+// ── REDIS CLIENTS ─────────────────────────────────────────────────────────
+const redis = new IORedis(redisUrl, { password: redisToken, tls: {} });
+const sub   = new IORedis(redisUrl, { password: redisToken, tls: {} });
 
-// Enable key-expiry events
-await redis.config("SET", "notify-keyspace-events", "Ex");
-await sub.psubscribe("__keyevent@0__:expired");
+// ── DIAGNOSTICS ───────────────────────────────────────────────────────────
+redis.on("ready", () => console.log("▶️ Redis client ready"));
+redis.on("error", err => console.error("❌ Redis client error:", err));
+sub.on("ready", () => console.log("▶️ Subscriber ready"));
+sub.on("error", err => console.error("❌ Subscriber error:", err));
 
-sub.on("pmessage", async (_p, _c, key) => {
-  if (!key.startsWith("shutdown:")) return;
-  const podId = key.split(":")[1];
-  console.log(`🔔 TTL expired for pod ${podId}`);
-
-  // GPU usage  |  if GPU is in use, extend time by another hour
-  console.log(`🔔 TTL expired for pod ${podId}… checking GPU usage`);
-  let util;
+// ── BOOTSTRAP KEYEVENT NOTIFICATIONS ──────────────────────────────────────
+;(async () => {
   try {
-    util = await fetchGpuUtilization(podId);
+    // We want *keyevent* expired → "__keyevent@0__:expired"
+    const setReply = await redis.config("SET", "notify-keyspace-events", "Ex");
+    console.log("CONFIG SET notify-keyspace-events →", setReply);
+
+    const getReply = await redis.config("GET", "notify-keyspace-events");
+    console.log("CONFIG GET notify-keyspace-events →", getReply[1]);
   } catch (err) {
-    console.warn(`⚠️ Could not check GPU for ${podId}, treating as busy`, err);
-    util = GPU_IDLE_THRESHOLD + 1;
-  }
-  console.log(`   → pod ${podId} util=${util}%`);
-
-  if (util > GPU_IDLE_THRESHOLD) {
-    console.log(`   ↩️ Pod busy, re-arming TTL for ${EXTEND_TTL_SEC}s`);
-    await redis.setex(`shutdown:${podId}`, EXTEND_TTL_SEC, "1");
-    return;
+    console.error("❌ CONFIG SET/GET failed:", err);
+    // we’ll still try to subscribe, but it may never fire
   }
 
-  console.log(`   ⚡️ Pod idle, issuing stop mutation…`);
+  // Subscribe to *expired* keyevents:
+  sub.psubscribe("__keyevent@0__:expired", (err, count) => {
+    if (err) console.error("❌ PSUBSCRIBE error:", err);
+    else console.log(`✅ PSUBSCRIBE OK; subscribed to ${count} patterns`);
+  });
 
-  const graphqlQuery = {
-    query: `
-      mutation StopPod($input: PodStopInput!) {
-        podStop(input: $input) {
-          id
-          desiredStatus
-        }
-      }
-    `,
-    variables: { input: { podId } },
-  };
+  // ── HANDLE EXPIRED EVENTS ────────────────────────────────────────────────
+  sub.on("pmessage", async (_pattern, _channel, key) => {
+    if (!key.startsWith("shutdown:")) return;
+    const podId = key.split(":")[1];
+    console.log(`🔔 TTL expired for pod ${podId}`);
 
-  try {
-    const resp = await fetch("https://api.runpod.io/graphql", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${RUNPOD_API_KEY}`,
-      },
-      body: JSON.stringify(graphqlQuery),
-    });
-    const json = await resp.json();
-    if (json.data?.podStop) {
-      console.log(
-        `✅ Pod ${json.data.podStop.id} stop issued → ${json.data.podStop.desiredStatus}`
-      );
-    } else {
-      console.error(`❌ podStop error for ${podId}:`, json.errors || json);
+    // 1) Check GPU utilization
+    let util = 0;
+    try {
+      util = await fetchGpuUtilization(podId);
+    } catch (err) {
+      console.warn(`⚠️ GPU check failed for ${podId}, assuming busy`, err);
+      util = GPU_IDLE_THRESHOLD + 1;
     }
-  } catch (e) {
-    console.error(`❌ Network/parsing error on podStop for ${podId}:`, e);
-  }
-});
+    console.log(`   → pod ${podId} util=${util}%`);
+
+    // 2) If still busy, re-arm the timer
+    if (util > GPU_IDLE_THRESHOLD) {
+      console.log(`   ↩️ Pod ${podId} busy; re-arming TTL (${EXTEND_TTL_SEC}s)`);
+      await redis.setex(`shutdown:${podId}`, EXTEND_TTL_SEC, "1");
+      return;
+    }
+
+    // 3) Otherwise actually stop it
+    console.log(`   ⚡️ Pod ${podId} idle; issuing stop mutation…`);
+    const graphql = {
+      query: `
+        mutation StopPod($input: PodStopInput!) {
+          podStop(input: $input) { id desiredStatus }
+        }`,
+      variables: { input: { podId } },
+    };
+
+    try {
+      const resp = await fetch("https://api.runpod.io/graphql", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${RUNPOD_API_KEY}`,
+        },
+        body: JSON.stringify(graphql),
+      });
+      const json = await resp.json();
+      if (json.data?.podStop) {
+        console.log(
+          `✅ Pod ${json.data.podStop.id} stop issued → ${json.data.podStop.desiredStatus}`
+        );
+      } else {
+        console.error(
+          `❌ podStop error for ${podId}:`,
+          json.errors || json
+        );
+      }
+    } catch (e) {
+      console.error(`❌ Network/parsing error stopping ${podId}:`, e);
+    }
+  });
+})();
