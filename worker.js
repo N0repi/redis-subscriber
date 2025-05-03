@@ -67,12 +67,16 @@ sub.on("error",   err => console.error("❌ Subscriber error:", err));
 
     // otherwise, really stop it
     console.log(`   ⚡️ Pod idle; issuing StopPod mutation…`);
+
     const graphql = {
       query: `
-        mutation StopPod($input: PodStopInput!) {
-          podStop(input: $input) { id desiredStatus }
-        }`,
-      variables: { input: { podId } },
+        mutation {
+          podStop(input: {podId: "${podId}"}) {
+            id
+            desiredStatus
+          }
+        }
+      `,
     };
 
     try {
