@@ -2,11 +2,15 @@
 
 import IORedis from "ioredis";
 import fetch from "node-fetch";
+import fetchGpuUtilization from "./fetchGpuUtilization"
 
 // Use the Redis URL (not the HTTP REST URL)
 const redisUrl   = process.env.UPSTASH_REDIS_REDIS_URL;
 const redisToken = process.env.UPSTASH_REDIS_REDIS_TOKEN;
 const RUNPOD_API_KEY = process.env.POD_KEY;
+
+const EXTEND_TTL_SEC = 1 * 3600; // extension of shutdown timer (1 hour)
+const GPU_IDLE_THRESHOLD = 5;  // percent
 
 if (!redisUrl || !redisToken || !RUNPOD_API_KEY) {
   console.error("Missing required env vars");
@@ -31,6 +35,25 @@ sub.on("pmessage", async (_p, _c, key) => {
   if (!key.startsWith("shutdown:")) return;
   const podId = key.split(":")[1];
   console.log(`🔔 TTL expired for pod ${podId}`);
+
+  // GPU usage  |  if GPU is in use, extend time by another hour
+  console.log(`🔔 TTL expired for pod ${podId}… checking GPU usage`);
+  let util;
+  try {
+    util = await fetchGpuUtilization(podId);
+  } catch (err) {
+    console.warn(`⚠️ Could not check GPU for ${podId}, treating as busy`, err);
+    util = GPU_IDLE_THRESHOLD + 1;
+  }
+  console.log(`   → pod ${podId} util=${util}%`);
+
+  if (util > GPU_IDLE_THRESHOLD) {
+    console.log(`   ↩️ Pod busy, re-arming TTL for ${EXTEND_TTL_SEC}s`);
+    await redis.setex(`shutdown:${podId}`, EXTEND_TTL_SEC, "1");
+    return;
+  }
+
+  console.log(`   ⚡️ Pod idle, issuing stop mutation…`);
 
   const graphqlQuery = {
     query: `

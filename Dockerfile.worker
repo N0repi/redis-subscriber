@@ -11,7 +11,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --only=production
 
 # Copy subscriber code
-COPY worker.js ./
+COPY worker.js fetchGpuUtilization.js getRunpodInstances.js ./
 
 # create a non-root user
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup

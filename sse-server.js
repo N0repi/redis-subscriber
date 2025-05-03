@@ -104,7 +104,7 @@ app.post("/notify-ready", express.json(), async (req, res) => {
     console.log("🔔 [SSE] /notify-ready received, podId=", podId);
     if (!podId) return res.status(400).json({ error: "Missing podId" });
 
-    console.log("🔔 /notify-ready for podId=", podId);
+    console.log("🔔 /notify-ready for podId =", podId);
     const doc = await podMeta.findOne({ podId });
     if (doc) {
       const subs = clients.get(doc.subscriptionId) || new Set();
