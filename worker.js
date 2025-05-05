@@ -14,80 +14,32 @@ if (!redisUrl || !redisToken || !RUNPOD_API_KEY) {
   process.exit(1);
 }
 
-// 1) Redis client (no need for pub/sub at all)
-const redis = new IORedis(redisUrl, {
-  password: redisToken,
-  tls: {},
-});
-
-redis.on("ready", () => console.log("▶️ Redis ready"));
-redis.on("error", (err) => console.error("❌ Redis error:", err));
-
-// 2) How often to poll
-const POLL_INTERVAL_MS = 15_000;
+// ── CONFIG ───────────────────────────────────────────────────────────────
+const POLL_INTERVAL_MS = 5_000;   // run every 5s in dev
 const GPU_IDLE_THRESHOLD = 5;     // %
-const EXTEND_TTL_SEC     = 3600;  // re-arm TTL if busy
+const EXTEND_TTL_SEC     = 15;    // re-arm TTL by 15s if busy
 
-// 3) Main scan loop
+// ── REDIS CLIENT ─────────────────────────────────────────────────────────
+const redis = new IORedis(redisUrl, { password: redisToken, tls: {} });
+
+redis.on("ready", () => console.log("▶️ Redis client ready"));
+redis.on("error", err => console.error("❌ Redis error:", err));
+
+// ── SCAN LOOP ────────────────────────────────────────────────────────────
 async function scanForExpiredPods() {
+  console.log("🔍 scanForExpiredPods()");
   try {
-    // Fetch all shutdown keys
     const keys = await redis.keys("shutdown:*");
+    console.log(`   🔑 found keys: ${keys.join(", ") || "<none>"}`);
     for (const key of keys) {
       const ttl = await redis.ttl(key);
+      console.log(`     ⏱ TTL(${key}) = ${ttl}s`);
       if (ttl <= 0) {
-        // TTL expired → handle pod shutdown
         const podId = key.split(":")[1];
-        console.log(`⏱ Poll: shutdown key expired for pod ${podId}`);
-
-        // 3a) Check GPU util
-        let util = 0;
-        try {
-          util = await fetchGpuUtilization(podId);
-        } catch (err) {
-          console.warn(`⚠️ GPU check failed for ${podId}, assuming busy`, err);
-          util = GPU_IDLE_THRESHOLD + 1;
-        }
-        console.log(`   → pod ${podId} GPU/mem util=${util}%`);
-
-        // 3b) If still busy, re-arm TTL
-        if (util > GPU_IDLE_THRESHOLD) {
-          console.log(`   ↩️ Pod busy; re-arming shutdown:${podId} TTL for ${EXTEND_TTL_SEC}s`);
-          await redis.setex(`shutdown:${podId}`, EXTEND_TTL_SEC, "1");
-          continue;
-        }
-
-        // 3c) Otherwise, issue podStop mutation
-        console.log(`   ⚡️ Pod idle; issuing podStop(${podId})…`);
-        const graphql = {
-          query: `
-            mutation {
-              podStop(input: {podId: "${podId}"}) {
-                id
-                desiredStatus
-              }
-            }`,
-        };
-        try {
-          const resp = await fetch("https://api.runpod.io/graphql", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${RUNPOD_API_KEY}`,
-            },
-            body: JSON.stringify(graphql),
-          });
-          const body = await resp.json();
-          if (body.data?.podStop) {
-            console.log(
-              `✅ podStop ${body.data.podStop.id} → ${body.data.podStop.desiredStatus}`
-            );
-          } else {
-            console.error(`❌ podStop error for ${podId}:`, body.errors || body);
-          }
-        } catch (e) {
-          console.error(`❌ Network/parsing error stopping ${podId}:`, e);
-        }
+        // remove key so we only stop once
+        await redis.del(key);
+        console.log(`   🛑 shutdown:${podId} expired → handling`);
+        await handlePodShutdown(podId);
       }
     }
   } catch (err) {
@@ -95,9 +47,59 @@ async function scanForExpiredPods() {
   }
 }
 
-// 4) Kick off the loop
+async function handlePodShutdown(podId) {
+  // 1) check GPU/memory
+  let util = 0;
+  try {
+    util = await fetchGpuUtilization(podId);
+  } catch (err) {
+    console.warn(`⚠️ GPU check failed, treating as busy`, err);
+    util = GPU_IDLE_THRESHOLD + 1;
+  }
+  console.log(`   → pod ${podId} util = ${util}%`);
+
+  // 2) re-arm if busy
+  if (util > GPU_IDLE_THRESHOLD) {
+    console.log(`   ↩️ Pod busy; re-arming shutdown:${podId} TTL ${EXTEND_TTL_SEC}s`);
+    await redis.set(`shutdown:${podId}`, "1", "EX", EXTEND_TTL_SEC);
+    return;
+  }
+
+  // 3) otherwise issue podStop
+  console.log(`   ⚡️ Pod idle; issuing podStop(${podId})…`);
+  const graphql = {
+    query: `
+      mutation {
+        podStop(input: { podId: "${podId}" }) {
+          id
+          desiredStatus
+        }
+      }`,
+  };
+  try {
+    const resp = await fetch("https://api.runpod.io/graphql", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${RUNPOD_API_KEY}`,
+      },
+      body: JSON.stringify(graphql),
+    });
+    const body = await resp.json();
+    if (body.data?.podStop) {
+      console.log(
+        `✅ podStop ${body.data.podStop.id} → ${body.data.podStop.desiredStatus}`
+      );
+    } else {
+      console.error(`❌ podStop error for ${podId}:`, body.errors || body);
+    }
+  } catch (e) {
+    console.error(`❌ Network/parsing error stopping ${podId}:`, e);
+  }
+}
+
+// ── START POLL ───────────────────────────────────────────────────────────
 console.log(`▶️ Starting poll loop every ${POLL_INTERVAL_MS/1000}s`);
 setInterval(scanForExpiredPods, POLL_INTERVAL_MS);
-
-// Also run one immediately
+// run once immediately
 scanForExpiredPods();
