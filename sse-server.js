@@ -18,27 +18,19 @@ app.use(cors({
     const allowed = [
       "https://wispi.art",
       "https://www.wispi.art",
-      "https://waifus.me",
-      "https://www.waifus.me",
+      "https://waifus.me",       // ← add this
+      "https://www.waifus.me",   // ← add this if you use www
     ];
-
-    const wildcardAllowed = [
-      ".proxy.runpod.net", // Allow subdomains like https://xyz-8000.proxy.runpod.net
-    ];
-
-    const isAllowed =
-      allowed.includes(incomingOrigin) ||
-      wildcardAllowed.some((suffix) => incomingOrigin.endsWith(suffix));
 
     console.log("🔑 SSE handshake Origin:", incomingOrigin);
-    if (isAllowed) {
+    if (allowed.includes(incomingOrigin)) {
       return callback(null, true);
     }
     return callback(
       new Error(`Origin ${incomingOrigin} not allowed by CORS`)
     );
   },
-  methods: ["GET", "POST", "OPTIONS"],
+  methods: ["GET","POST","OPTIONS"],   // allow your new /notify-ready too
 }));
 
 // We need JSON body‐parsing for our new /notify-ready hook
