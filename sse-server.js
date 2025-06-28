@@ -56,7 +56,7 @@ try {
 // ——————————————————————————————————————————————————
 const mongoClient = new MongoClient(process.env.MONGO_URI);
 await mongoClient.connect();
-const podMeta = mongoClient.db("podActivityDB").collection("podMetadata");
+const podMeta = mongoClient.db("wispi").collection("podMetadata");
 
 // ——————————————————————————————————————————————————
 // SSE client registry
